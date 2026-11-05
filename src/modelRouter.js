@@ -37,6 +37,9 @@ function getNextApiKey() {
 
 // ─── GEMINI KEYS & OPENROUTER ───
 const GEMINI_KEYS = [
+  process.env.SOUMYA_GEMINI_ONE,
+  process.env.SOUMYA_GEMINI_TWO,
+  process.env.SOUMYA_GEMINI_THREE,
   process.env.GEMINI_API_KEY_ONE,
   process.env.GEMINI_API_KEY_TWO,
   process.env.GEMINI_API_KEY_THREE,
@@ -47,6 +50,14 @@ const GEMINI_KEYS = [
   process.env.GEMINI_API_KEY_EIGHT,
   process.env.GEMINI_API_KEY_NINE || process.env.GEMINI_API_NINE,
 ].filter(Boolean);
+
+let geminiKeyIndex = 0;
+function getNextGeminiApiKey() {
+  if (GEMINI_KEYS.length === 0) return null;
+  const key = GEMINI_KEYS[geminiKeyIndex % GEMINI_KEYS.length];
+  geminiKeyIndex++;
+  return key;
+}
 
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "minimax/minimax-m3.1-flash:free";
@@ -106,7 +117,7 @@ async function sendToGeminiKey(apiKey, prompt, images) {
   const contents = buildGeminiContents(images, prompt);
 
   const response = await ai.models.generateContent({
-    model: "gemini-3.1-flash-lite",
+    model: "gemini-flash-lite-latest",
     contents,
     config: {
       responseMimeType: "application/json"
@@ -117,133 +128,49 @@ async function sendToGeminiKey(apiKey, prompt, images) {
 }
 
 /**
- * Races a batch of keys concurrently using Promise.any.
- * Returns the first key that succeeds with parsed JSON.
- */
-async function executeBatchOfGeminiKeys(keys, batchName, prompt, images) {
-  if (!keys || keys.length === 0) {
-    throw new Error(`[Batch ${batchName}] No keys configured.`);
-  }
-
-  console.log(`[ModelRouter] [${batchName}] Dispatching batch of ${keys.length} keys in parallel...`);
-
-  const promises = keys.map(async (key, index) => {
-    try {
-      const res = await sendToGeminiKey(key, prompt, images);
-      console.log(`[ModelRouter] [${batchName}] Key ending in ...${key.slice(-6)} (index ${index + 1}) succeeded!`);
-      return res;
-    } catch (err) {
-      console.warn(`[ModelRouter] [${batchName}] Key ending in ...${key.slice(-6)} (index ${index + 1}) failed: ${err.message}`);
-      throw err;
-    }
-  });
-
-  try {
-    return await Promise.any(promises);
-  } catch (aggregateErr) {
-    console.warn(`[ModelRouter] [${batchName}] All ${keys.length} keys in this batch failed.`);
-    throw aggregateErr;
-  }
-}
-
-/**
- * Fallback to OpenRouter using OpenAI-compatible vision chat completion.
- */
-async function sendToOpenRouter(prompt, images) {
-  if (!OPENROUTER_KEY) {
-    throw new Error("OpenRouter API key is not configured.");
-  }
-
-  console.log(`[ModelRouter] [Stage 3] Dispatching to OpenRouter using model "${OPENROUTER_VISION_MODEL}"...`);
-
-  const contentItems = [{ type: "text", text: prompt }];
-  for (const img of images) {
-    contentItems.push({
-      type: "image_url",
-      image_url: {
-        url: `data:${img.mimeType || "image/jpeg"};base64,${img.base64}`
-      }
-    });
-  }
-
-  const response = await axios.post(
-    OPENROUTER_ENDPOINT,
-    {
-      model: OPENROUTER_VISION_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: contentItems
-        }
-      ],
-      temperature: 0.1,
-      max_tokens: 1024
-    },
-    {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENROUTER_KEY}`
-      },
-      timeout: 30000
-    }
-  );
-
-  const text = response.data?.choices?.[0]?.message?.content;
-  return parseMaybeJson(text);
-}
-
-/**
- * Executes a vision prompt with 3-Stage Fallback:
- *  Stage 1: First 4 Gemini keys (sent in parallel batch, first to succeed wins)
- *  Stage 2: Next 5 Gemini keys (sent in parallel batch, first to succeed wins)
- *  Stage 3: OpenRouter API key
+ * Executes a vision prompt using round-robin rotation of Gemini keys one by one,
+ * followed by OpenRouter fallback if all Gemini keys fail.
  *
  * @param {string} prompt
  * @param {Array<{base64: string, mimeType: string}>} images
  */
 async function executeVisionPipeline(prompt, images) {
-  const stage1Keys = GEMINI_KEYS.slice(0, 4);
-  const stage2Keys = GEMINI_KEYS.slice(4, 9);
-
   let lastError = null;
+  const attemptsCount = GEMINI_KEYS.length;
 
-  // ── Stage 1: First 4 Gemini keys ───────────────────────────────────────────
-  if (stage1Keys.length > 0) {
+  for (let attempt = 0; attempt < attemptsCount; attempt++) {
+    const key = getNextGeminiApiKey();
+    if (!key) break;
+
     try {
-      console.log("[ModelRouter] [Stage 1/3] Attempting first 4 Gemini keys in parallel...");
-      const result = await executeBatchOfGeminiKeys(stage1Keys, "Stage 1 (Keys 1-4)", prompt, images);
-      return result;
+      console.log(`[ModelRouter] Attempting Gemini key ...${key.slice(-6)} (attempt ${attempt + 1}/${attemptsCount})...`);
+      const res = await sendToGeminiKey(key, prompt, images);
+      console.log(`[ModelRouter] Key ending in ...${key.slice(-6)} succeeded!`);
+      return res;
     } catch (err) {
       lastError = err;
+      console.warn(`[ModelRouter] Key ending in ...${key.slice(-6)} failed: ${err.message}`);
+      if (attempt < attemptsCount - 1) {
+        await new Promise(r => setTimeout(r, 200));
+      }
     }
   }
 
-  // ── Stage 2: Next 5 Gemini keys ────────────────────────────────────────────
-  if (stage2Keys.length > 0) {
-    try {
-      console.log("[ModelRouter] [Stage 2/3] Attempting next 5 Gemini keys in parallel...");
-      const result = await executeBatchOfGeminiKeys(stage2Keys, "Stage 2 (Keys 5-9)", prompt, images);
-      return result;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-
-  // ── Stage 3: OpenRouter ────────────────────────────────────────────────────
+  // ── OpenRouter Fallback ───────────────────────────────────────────────────
   if (OPENROUTER_KEY) {
     try {
-      console.log("[ModelRouter] [Stage 3/3] Attempting OpenRouter fallback...");
+      console.log("[ModelRouter] Attempting OpenRouter fallback...");
       const result = await sendToOpenRouter(prompt, images);
       return result;
     } catch (err) {
       lastError = err;
-      console.error("[ModelRouter] [Stage 3/3] OpenRouter failed:", err.message);
+      console.error("[ModelRouter] OpenRouter failed:", err.message);
     }
   } else {
-    console.warn("[ModelRouter] Stage 3 skipped: OPENROUTER_API_KEY not configured.");
+    console.warn("[ModelRouter] OpenRouter skipped: OPENROUTER_API_KEY not configured.");
   }
 
-  console.error("❌ All 3 stages of vision fallback failed. Last error:", lastError?.message);
+  console.error("❌ All vision attempts failed. Last error:", lastError?.message);
   return null;
 }
 
