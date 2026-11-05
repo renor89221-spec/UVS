@@ -2,10 +2,10 @@
  * leaderboardChannelCleaner.js
  *
  * Deletes all messages in each guild's leaderboard channel
- * EXCEPT the one stored in lb_msg_guilds (the pinned combined leaderboard).
+ * EXCEPT the ones stored in lb_msg_guilds as "statsId,rosterId" (VTC stats card + driver roster).
  *
  * - Runs on bot restart
- * - Scheduled daily at 1:00 AM
+ * - Scheduled daily at 1:00 AM IST (UTC+5:30 = 19:30 UTC previous day → cron "30 19 * * *")
  */
 
 const cron = require("node-cron");
@@ -47,13 +47,16 @@ async function cleanLeaderboardChannels(client) {
       continue;
     }
 
-    const keepId = guild.lb_msg_guilds ? String(guild.lb_msg_guilds).trim() : null;
+    // Keep both the stats embed AND the roster embed (stored as "statsId,rosterId" in lb_msg_guilds)
+    const keepIds = new Set(
+      (guild.lb_msg_guilds || "").split(",").map((s) => s.trim()).filter(Boolean)
+    );
+
     let deleted = 0;
     let skipped = 0;
 
     for (const [id, msg] of messages) {
-      if (keepId && id === keepId) {
-        console.log(`  ✅ Keeping lb_msg_guilds message: ${id}`);
+      if (keepIds.has(id)) {
         skipped++;
         continue;
       }
@@ -61,7 +64,6 @@ async function cleanLeaderboardChannels(client) {
         await msg.delete();
         deleted++;
         console.log(`  🗑️  Deleted message ${id}`);
-        // Small delay to avoid rate limits
         await new Promise(r => setTimeout(r, 500));
       } catch (err) {
         console.warn(`  ⚠️  [LeaderboardCleaner] Could not delete ${id}: ${err.message}`);
@@ -75,12 +77,12 @@ async function cleanLeaderboardChannels(client) {
 }
 
 function registerLeaderboardChannelCleaner(client) {
-  // Schedule daily at 1:00 AM
-  cron.schedule("0 1 * * *", () => {
+  // Schedule daily at 1:00 AM IST (UTC = 19:30 previous day)
+  cron.schedule("30 19 * * *", () => {
     cleanLeaderboardChannels(client);
   });
 
-  console.log("✅ [LeaderboardCleaner] Cron scheduled for 1:00 AM daily.");
+  console.log("✅ [LeaderboardCleaner] Cron scheduled for 1:00 AM IST daily.");
 
   // Fire immediately on bot restart
   cleanLeaderboardChannels(client);

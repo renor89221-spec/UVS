@@ -42,6 +42,13 @@ async function getGuildConfig(guildId) {
     leaderboard_channel_id: guild.leaderboard_channel_id || null,
     call_channel_id: guild.call_channel_id || null,
 
+    // Leaderboard message IDs (stored as "statsId,rosterId" in lb_msg_guilds)
+    lb_msg_guilds: guild.lb_msg_guilds || null,
+
+    // Roles
+    founder: guild.founder || null,
+    manager: guild.manager || null,
+
     // Emojis (Hardcoded since DB columns were deleted)
     star_1_emoji: "<a:stara:1530926858646847488>",
     star_2_emoji: "<a:starb:1530926845413818439>",
@@ -49,7 +56,8 @@ async function getGuildConfig(guildId) {
 
     // Features
     enable_clear_stats: guild.enable_clear_stats !== false, // default true
-    enable_unb_economy: guild.enable_unb_economy === true // default false
+    enable_unb_economy: guild.enable_unb_economy === true,  // default false
+    temp_suspension: guild.temp_suspension || false
   };
 
   // Cache it
@@ -63,6 +71,7 @@ async function getGuildConfig(guildId) {
 
 function getDefaultConfig() {
   return {
+    guild_name: "",
     guild_tag: "",
     avatar_url: null,
     embed_color: 0xff7801,
@@ -70,11 +79,15 @@ function getDefaultConfig() {
     screenshot_channel_id: null,
     leaderboard_channel_id: null,
     call_channel_id: null,
+    lb_msg_guilds: null,
+    founder: null,
+    manager: null,
     star_1_emoji: "<a:stara:1530926858646847488>",
     star_2_emoji: "<a:starb:1530926845413818439>",
-    star_3_emoji: "<a:starc:1530926869191462952>", 
+    star_3_emoji: "<a:starc:1530926869191462952>",
     enable_clear_stats: true,
-    enable_unb_economy: false
+    enable_unb_economy: false,
+    temp_suspension: false
   };
 }
 

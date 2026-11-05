@@ -1,0 +1,91 @@
+remove the command and make these changes to permanent embeds posted in channels in per VTC 
+on the first embed it shows all the details about that vtc total drivers, netwoth, combined kms, total score, total stars, total deliveries, percentage of runs with no penalty that is clean deliveries/ total runs * 100 
+{vtc_name} is {speed_type} moving forward with an average speed of {total_distance/total_drivingtime} tune as you like
+
+speed_type = Below 30kmph	Slowly	Moving slowly
+30–49	50–69	70–89	90–109	110–129	130+	
+My preferred alternatives:
+- Leisurely
+- Steadily
+- Smoothly
+- Swiftly
+- Rapidly
+- Dynamically
+- At full throttle
+
+For the clean delivery percentage, I'd use Driving Discipline or Delivery Cleanliness as the metric name, with a descriptive status phrase similar to your speed classification.
+1. Clean delivery terminology
+Clean delivery %	Status	Display phrase
+Below 30%	Poor	Delivering poorly
+30–49%	Fair	Maintaining fair discipline
+50–69%	Good	Delivering cleanly
+70–89%	Excellent	Maintaining excellent discipline
+90–99%	Outstanding	Delivering with outstanding discipline
+100%	Perfect	Maintaining a perfect record
+Show in sentence. 
+
+now about the drivers list, currently there are 3 embeds in every vtc first is vtc info and second is distance lb and thord is drivers lb, make it into two, first as i told above and second one is drivers list 10 per embed with pagination and drop down menu of sort by with all the options that it can be sorted by, default option is sorted by amount of time they have been on server with founder freezed on #1 and managers starting from #2, same embed is edited. embed resets to default as scheduled cron job at 9 AM AM GMT + 5:30 
+use these emojis manager for mmanagers and for everyone else use the drivers emoji 
+<:distance:1567953812189225121>
+<:clean_deliveries:1567953809102213210>
+<:score:1567953806959054859>
+<:stars:1567953804584951920>
+<:time:1567953802022359112>
+<:manager:1567953799291740253>
+<:drivers:1567953797094051911>
+<:networth:1567953794669481994>
+<:founder:1567953792652156989>
+<:runs:1567953790072524821>
+<:driver:1567954698642784316>
+make all these changes to permanent leaderboards posted in each VTC, 
+
+added two columns to approved guilds table in supabase named Founder and Manager which will used to store user ids, both are text type, founders can only be one btut managers can be multiple 
+add two new owner only commands, /set-manager <user_id>/<user> /set-founder <user_id>/<user> while showing the users on leaderboard it should show [Founder] and [Manager] in front of their names, in the webhooke cards , it should show Founder and Manager from now on (only if fields are not NULL in DB)
+
+New table schema : 
+create table public.approved_guilds (
+  guild_id text not null,
+  guild_name text not null,
+  guild_tag text not null,
+  approved_at timestamp with time zone null default now(),
+  avatar_url text null,
+  embed_color integer null default 16742401,
+  screenshot_channel_id text null,
+  leaderboard_channel_id text null,
+  enable_clear_stats boolean null default true,
+  created_at timestamp with time zone null default now(),
+  lb_msg_guilds text null,
+  guild_income numeric(15, 2) null default 0.00,
+  net_worth numeric null,
+  runs numeric null,
+  webhook_id text null,
+  is_suspended boolean not null default false,
+  call_channel_id numeric null,
+  radio_frequency numeric(5, 2) null default null::numeric,
+  logo_emojis text null,
+  enable_unb_economy boolean not null default false,
+  founder text null,
+  manager text null,
+  temp_suspension boolean null,
+  constraint approved_guilds_pkey primary key (guild_id),
+  constraint approved_guilds_founder_key unique (founder),
+  constraint approved_guilds_logo_emojis_key unique (logo_emojis)
+) TABLESPACE pg_default;
+
+create unique INDEX IF not exists approved_guilds_guild_id_unique on public.approved_guilds using btree (guild_id) TABLESPACE pg_default;
+
+add owner only command /approve-guild with arguments (
+    guild_id,
+    guild_name,
+    guild_tag,
+    avatar_url,
+    embed_color,
+    screenshot_channel_id,
+    leaderboard_channel_id
+)
+to add a row in approved guilds table 
+
+add a owner only command /temp-suspend <guild_id>. this will stop sending their VTC card through webhook id and deltes their current card (nothing else happens) 
+
+
+add a owner only command /owner-cmds which shows all these commands 

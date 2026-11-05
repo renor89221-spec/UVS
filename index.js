@@ -24,7 +24,7 @@ const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const { registerScreenshotListener } = require("./src/stats_system/screenshotListener");
 const { supabase } = require("./src/stats_system/supabase");
 const { registerLeaderboardRealtime } = require("./src/stats_system/realtimeLeaderboard");
-const { updateLeaderboard, updateGlobalWebhook } = require("./src/stats_system/leaderboardService");
+const { updateLeaderboard, updateGlobalWebhook, renderRosterPage } = require("./src/stats_system/leaderboardService");
 const { registerDailyInspector } = require("./src/stats_system/dailyInspector");
 const { registerDisplayNameSync } = require("./src/stats_system/displayNameSync");
 const { registerLeaderboardChannelCleaner } = require("./src/stats_system/leaderboardChannelCleaner");
@@ -49,6 +49,16 @@ const { handleRadioMessage } = require("./src/radioManager");
 const { updateRadioDirectory } = require("./src/stats_system/radioDirectory");
 const { handleMemberJoin, handleMemberLeave, syncAllMembers } = require("./src/stats_system/surveillanceService");
 
+// ─── Owner Command Modules ───
+const {
+  setfounder,
+  setmanager,
+  approveguild,
+  tempsuspend,
+  lifttempsuspend,
+  ownercmds,
+} = require("./src/commands/ownerCmds");
+
 // ─── Command Router ───
 const commandHandlers = {
   stats: statsCmd.execute,
@@ -70,6 +80,13 @@ const commandHandlers = {
   setradiochannel: radiochannelCmd.execute,
   codes: codesCmd.execute,
   activateunbeconomy: activateunbeconomyCmd.execute,
+  // Owner commands
+  "set-founder":      setfounder,
+  "set-manager":      setmanager,
+  "approve-guild":    approveguild,
+  "temp-suspend":     tempsuspend,
+  "lift-temp-suspend": lifttempsuspend,
+  "owner-cmds":       ownercmds,
 };
 
 const client = new Client({
@@ -92,7 +109,7 @@ client.once("clientReady", async () => {
     status: "online"
   });
 
-  // Register Realtime Listener
+  // Register Realtime Listener (also registers 9 AM IST roster reset cron)
   registerLeaderboardRealtime(client);
 
   // Register Daily AI Inspector Cron Jobs
@@ -101,7 +118,7 @@ client.once("clientReady", async () => {
   // Register Display Name Sync Cron Job
   registerDisplayNameSync(client);
 
-  // Register Leaderboard Channel Cleaner (on restart + 1 AM daily)
+  // Register Leaderboard Channel Cleaner (on restart + 1 AM IST daily)
   registerLeaderboardChannelCleaner(client);
 
   // Register 15-minute Job Report Retry Service
@@ -163,10 +180,10 @@ client.once("clientReady", async () => {
     try {
       const { data: allGuilds } = await supabase
         .from("approved_guilds")
-        .select("guild_id, lb_msg_guilds");
+        .select("guild_id");
 
       if (allGuilds && allGuilds.length > 0) {
-        console.log(`[Leaderboard] Editing leaderboards for ${allGuilds.length} guild(s) on restart...`);
+        console.log(`[Leaderboard] Refreshing leaderboards for ${allGuilds.length} guild(s) on restart...`);
         for (const guild of allGuilds) {
           await updateLeaderboard(client, guild.guild_id).catch(err =>
             console.error(`[Leaderboard] Restart refresh failed for ${guild.guild_id}:`, err)
@@ -188,7 +205,7 @@ client.once("clientReady", async () => {
   // 2. Fetch all approved guilds from the database
   const { data: approvedGuilds, error: fetchGuildsErr } = await supabase
     .from("approved_guilds")
-    .select("guild_id")
+    .select("guild_id, guild_name, guild_tag")
     .eq("is_suspended", false);
 
   if (fetchGuildsErr) {
@@ -199,16 +216,8 @@ client.once("clientReady", async () => {
   const activeGuildIds = approvedGuilds ? approvedGuilds.map(g => g.guild_id) : [];
   const hqGuildId = process.env.HQ_GUILD_ID;
 
-  // Define commands for standard VTC servers (has 'global' option)
-  const standardCommands = [
-    { name: "stats", description: "Check trucking stats", options: [{ name: "user", description: "View stats of another player", type: 6, required: false }] },
-    { name: "speedlb", description: "View top average speeds", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
-    { name: "levellb", description: "View highest level truckers", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
-    { name: "distancelb", description: "View top drivers by total distance", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
-    { name: "timelb", description: "View top drivers by total time", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
-    { name: "networthlb", description: "View top drivers by their Net Worth", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
-    { name: "worstdrivers", description: "View worst drivers by penalties", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
-    { name: "bestdrivers", description: "View best drivers by clean deliveries", options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+  // ─── Shared owner-only command definitions ───
+  const ownerCommandDefs = [
     { name: "clearstats", description: "Clear a user's stats (Owner Only)", options: [{ name: "user", description: "User to clear", type: 6, required: true }] },
     {
       name: "changelevel",
@@ -224,95 +233,99 @@ client.once("clientReady", async () => {
     { name: "changeguild", description: "Change a user's guild/company (Owner Only)", options: [{ name: "user", description: "User to move", type: 6, required: true }] },
     { name: "suspendvtc", description: "Suspend a VTC from leaderboards (Owner Only)", options: [{ name: "guild_id", type: 3, description: "ID of the server", required: true }] },
     { name: "restorevtc", description: "Restore a suspended VTC to leaderboards (Owner Only)", options: [{ name: "guild_id", type: 3, description: "ID of the server", required: true }] },
-    { name: "help", description: "Show bot instructions and commands" },
     {
-      name: "setradiofrequency",
-      description: "Set the radio frequency for cross-server transmissions",
+      name: "approve-guild",
+      description: "Add a new VTC to the approved guilds list (Owner Only)",
       options: [
-        {
-          name: "frequency",
-          description: "Frequency between 100.00 and 120.00 MHz (e.g., 119.88)",
-          type: 10,
-          required: true
-        }
+        { name: "guild_id",               type: 3, description: "Discord Guild/Server ID",        required: true  },
+        { name: "guild_name",             type: 3, description: "Full name of the VTC",            required: true  },
+        { name: "guild_tag",              type: 3, description: "Tag/abbreviation of the VTC",     required: true  },
+        { name: "avatar_url",             type: 3, description: "URL for the VTC logo/thumbnail",  required: true  },
+        { name: "embed_color",            type: 3, description: "Hex color code (e.g. FF7801)",     required: false },
+        { name: "screenshot_channel_id",  type: 3, description: "ID of the screenshot channel",   required: false },
+        { name: "leaderboard_channel_id", type: 3, description: "ID of the leaderboard channel",  required: false }
       ]
     },
     {
-      name: "setradiochannel",
-      description: "Set the channel where incoming radio transmissions are delivered",
+      name: "set-founder",
+      description: "Set the Founder of a VTC (Owner Only)",
       options: [
-        {
-          name: "channel",
-          description: "The text channel UVS has access to",
-          type: 7,
-          required: true,
-          channel_types: [0, 5, 10, 11, 12]
-        }
+        { name: "guild_id", type: 3, description: "Target VTC's Guild ID", required: true  },
+        { name: "user",     type: 6, description: "Mention the user",       required: false },
+        { name: "user_id",  type: 3, description: "Discord User ID",        required: false }
       ]
     },
     {
-      name: "codes",
-      description: "View the job log error codes (Owner Only)"
+      name: "set-manager",
+      description: "Add or remove a Manager of a VTC (Owner Only)",
+      options: [
+        { name: "guild_id", type: 3, description: "Target VTC's Guild ID",        required: true  },
+        { name: "action",   type: 3, description: "Add or remove manager",        required: true,
+          choices: [{ name: "Add Manager", value: "add" }, { name: "Remove Manager", value: "remove" }] },
+        { name: "user",     type: 6, description: "Mention the user",             required: false },
+        { name: "user_id",  type: 3, description: "Discord User ID",              required: false }
+      ]
     },
     {
-      name: "activateunbeconomy",
-      description: "Activate UnbelievaBoat economy integration for this server (Owner Only)"
-    }
+      name: "temp-suspend",
+      description: "Remove a VTC's webhook card without full suspension (Owner Only)",
+      options: [{ name: "guild_id", type: 3, description: "Target VTC's Guild ID", required: true }]
+    },
+    {
+      name: "lift-temp-suspend",
+      description: "Restore a temp-suspended VTC's webhook card (Owner Only)",
+      options: [{ name: "guild_id", type: 3, description: "Target VTC's Guild ID", required: true }]
+    },
+    { name: "owner-cmds", description: "Show all owner-only commands (Owner Only)" },
   ];
 
-  // Define commands for Headquarters/Main VTC Server (NO 'global' option)
-  const hqCommands = [
-    { name: "stats", description: "Check trucking stats", options: [{ name: "user", description: "View stats of another player", type: 6, required: false }] },
-    { name: "speedlb",    description: "View top average speeds (Global)" },
-    { name: "levellb",    description: "View highest level truckers (Global)" },
-    { name: "distancelb", description: "View top drivers by total distance (Global)" },
-    { name: "timelb",     description: "View top drivers by total time (Global)" },
-    { name: "networthlb", description: "View top drivers by their Net Worth (Global)" },
-    { name: "worstdrivers", description: "View worst drivers by penalties (Global)" },
-    { name: "bestdrivers", description: "View best drivers by clean deliveries (Global)" },
-    { name: "clearstats",  description: "Reset a user's stats (Owner Only)", options: [{ name: "user", description: "User to clear", type: 6, required: true }] },
-    {
-      name: "changelevel",
-      description: "Change a driver's career level (Owner Only)",
-      options: [
-        { name: "new_level", description: "The new level to set", type: 4, required: true },
-        { name: "user", description: "Mention user", type: 6, required: false },
-        { name: "user_id", description: "Discord User ID", type: 3, required: false },
-        { name: "username", description: "Driver username", type: 3, required: false }
-      ]
-    },
-    { name: "suspenduser", description: "Suspend a user from logging jobs (Owner Only)", options: [{ name: "user", description: "User to suspend", type: 6, required: true }, { name: "reason", description: "Reason for suspension", type: 3, required: true }] },
-    { name: "changeguild", description: "Change a user's guild/company (Owner Only)", options: [{ name: "user", description: "User to move", type: 6, required: true }] },
-    { name: "suspendvtc", description: "Suspend a VTC from leaderboards (Owner Only)", options: [{ name: "guild_id", type: 3, description: "ID of the server", required: true }] },
-    { name: "restorevtc", description: "Restore a suspended VTC to leaderboards (Owner Only)", options: [{ name: "guild_id", type: 3, description: "ID of the server", required: true }] },
+  // ─── Standard radio/misc commands ───
+  const sharedMiscCommands = [
     { name: "help", description: "Show bot instructions and commands" },
     {
       name: "setradiofrequency",
       description: "Set the radio frequency for cross-server transmissions",
       options: [
-        {
-          name: "frequency",
-          description: "Frequency between 100.00 and 120.00 MHz (e.g., 119.88)",
-          type: 10,
-          required: true
-        }
+        { name: "frequency", description: "Frequency between 100.00 and 120.00 MHz (e.g., 119.88)", type: 10, required: true }
       ]
     },
     {
       name: "setradiochannel",
       description: "Set the channel where incoming radio transmissions are delivered",
       options: [
-        {
-          name: "channel",
-          description: "The text channel UVS has access to",
-          type: 7,
-          required: true,
-          channel_types: [0, 5, 10, 11, 12]
-        }
+        { name: "channel", description: "The text channel UVS has access to", type: 7, required: true, channel_types: [0, 5, 10, 11, 12] }
       ]
     },
-    { name: "codes", description: "View the job log error codes" },
+    { name: "codes", description: "View the job log error codes (Owner Only)" },
     { name: "activateunbeconomy", description: "Activate UnbelievaBoat economy integration for this server (Owner Only)" }
+  ];
+
+  // ─── Standard VTC commands (has 'global' option on leaderboards) ───
+  const standardCommands = [
+    { name: "stats", description: "Check trucking stats", options: [{ name: "user", description: "View stats of another player", type: 6, required: false }] },
+    { name: "speedlb",    description: "View top average speeds",             options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    { name: "levellb",    description: "View highest level truckers",          options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    { name: "distancelb", description: "View top drivers by total distance",   options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    { name: "timelb",     description: "View top drivers by total time",       options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    { name: "networthlb", description: "View top drivers by their Net Worth",  options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    { name: "worstdrivers", description: "View worst drivers by penalties",        options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    { name: "bestdrivers",  description: "View best drivers by clean deliveries",  options: [{ name: "global", description: "Show all approved VTC members", type: 5, required: false }] },
+    ...ownerCommandDefs,
+    ...sharedMiscCommands
+  ];
+
+  // ─── HQ/Headquarters commands (global leaderboards, VTC-selector for owner cmds) ───
+  const hqCommands = [
+    { name: "stats", description: "Check trucking stats", options: [{ name: "user", description: "View stats of another player", type: 6, required: false }] },
+    { name: "speedlb",    description: "View top average speeds (Global)"              },
+    { name: "levellb",    description: "View highest level truckers (Global)"          },
+    { name: "distancelb", description: "View top drivers by total distance (Global)"   },
+    { name: "timelb",     description: "View top drivers by total time (Global)"       },
+    { name: "networthlb", description: "View top drivers by their Net Worth (Global)"  },
+    { name: "worstdrivers", description: "View worst drivers by penalties (Global)"       },
+    { name: "bestdrivers",  description: "View best drivers by clean deliveries (Global)" },
+    ...ownerCommandDefs,
+    ...sharedMiscCommands
   ];
 
   // Register commands per-guild
@@ -346,6 +359,7 @@ client.on("guildCreate", async (guild) => {
 
 // ─── INTERACTION HANDLER ───
 client.on("interactionCreate", async (interaction) => {
+
   // ─── Slash Commands ───
   if (interaction.isChatInputCommand()) {
     if (!interaction.guild) {
@@ -356,10 +370,16 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "❌ Unauthorized server.", ephemeral: true });
     }
 
-    // All non-owner slash commands require a registered UVS player record.
-    // Owner commands remain available for administration and account recovery.
+    // Owner-only commands bypass registration check
+    const ownerOnlyCommands = new Set([
+      "clearstats", "suspenduser", "changeguild", "changelevel",
+      "suspendvtc", "restorevtc", "codes", "activateunbeconomy",
+      "approve-guild", "set-founder", "set-manager",
+      "temp-suspend", "lift-temp-suspend", "owner-cmds"
+    ]);
+
     const { isOwner } = require("./src/owner");
-    if (!isOwner(interaction.user.id)) {
+    if (!isOwner(interaction.user.id) && !ownerOnlyCommands.has(interaction.commandName)) {
       const { data: registeredPlayer, error: registrationError } = await supabase
         .from("players")
         .select("id")
@@ -423,9 +443,68 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // ─── Button Interactions: Leaderboard Pagination ───
+  // ─── String Select Menu: Roster Sort ───
+  if (interaction.isStringSelectMenu()) {
+    const { customId } = interaction;
+
+    if (customId.startsWith("roster_sort:")) {
+      // customId format: roster_sort:<guildId>:<currentPage>
+      const parts = customId.split(":");
+      const targetGuildId = parts[1];
+      const sortKey = interaction.values[0];
+      // Reset to page 0 on sort change
+      try {
+        await interaction.deferUpdate();
+        const response = await renderRosterPage(targetGuildId, sortKey, 0);
+        if (response) await interaction.editReply(response);
+      } catch (err) {
+        console.error(`[Roster] Select menu error for ${customId}:`, err);
+      }
+      return;
+    }
+  }
+
+  // ─── Button Interactions ───
   if (interaction.isButton()) {
     const { customId, guild } = interaction;
+
+    // Roster Pagination: roster_page:<guildId>:<page>:<sortKey>
+    if (customId.startsWith("roster_page:")) {
+      const parts = customId.split(":");
+      const targetGuildId = parts[1];
+      const page = parseInt(parts[2], 10);
+      const sortKey = parts[3] || "seniority";
+      try {
+        await interaction.deferUpdate();
+        const response = await renderRosterPage(targetGuildId, sortKey, page);
+        if (response) await interaction.editReply(response);
+      } catch (err) {
+        console.error(`[Roster] Page button error for ${customId}:`, err);
+      }
+      return;
+    }
+
+    // Roster Reset: roster_reset:<guildId>
+    if (customId.startsWith("roster_reset:")) {
+      const parts = customId.split(":");
+      const targetGuildId = parts[1];
+      try {
+        await interaction.deferUpdate();
+        const response = await renderRosterPage(targetGuildId, "seniority", 0);
+        if (response) await interaction.editReply(response);
+      } catch (err) {
+        console.error(`[Roster] Reset button error for ${customId}:`, err);
+      }
+      return;
+    }
+
+    // Roster Noop (page indicator button)
+    if (customId.startsWith("roster_noop")) {
+      await interaction.deferUpdate().catch(() => {});
+      return;
+    }
+
+    // Standard Leaderboard Pagination: lb_page:<command>:<isGlobal>:<page>
     if (!customId.startsWith("lb_page:")) return;
 
     const [, commandName, isGlobalStr, pageStr] = customId.split(":");
