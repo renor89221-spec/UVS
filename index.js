@@ -1,6 +1,7 @@
 /**
  * ============================================================================
  * MODULE: index.js
+ * No Change
  * PURPOSE: The main boot file and entry point for the UVS Discord Bot. 
  *          Handles Discord client initialization, registers slash commands, 
  *          and routes interactions to command modules.
