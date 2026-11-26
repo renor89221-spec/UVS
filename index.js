@@ -25,11 +25,12 @@ const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const { registerScreenshotListener } = require("./src/stats_system/screenshotListener");
 const { supabase } = require("./src/stats_system/supabase");
 const { registerLeaderboardRealtime } = require("./src/stats_system/realtimeLeaderboard");
-const { updateLeaderboard, updateGlobalWebhook, renderRosterPage } = require("./src/stats_system/leaderboardService");
+const { updateLeaderboard, updateGlobalWebhook, renderRosterPage, renderHQLeaderboardPage } = require("./src/stats_system/leaderboardService");
 const { registerDailyInspector } = require("./src/stats_system/dailyInspector");
 const { registerDisplayNameSync } = require("./src/stats_system/displayNameSync");
 const { registerLeaderboardChannelCleaner } = require("./src/stats_system/leaderboardChannelCleaner");
 const { registerRetryService } = require("./src/stats_system/retryService");
+const { startHeartbeat } = require("./src/stats_system/heartbeat");
 const { isGuildApproved } = require("./src/guildGuard");
 
 // ─── Command Modules ───
@@ -118,6 +119,9 @@ client.once("clientReady", async () => {
 
   // Register Display Name Sync Cron Job
   registerDisplayNameSync(client);
+
+  // Start 5-minute heartbeat for TmP UVS Monitor
+  startHeartbeat();
 
   // Register Leaderboard Channel Cleaner (on restart + 1 AM IST daily)
   registerLeaderboardChannelCleaner(client);
@@ -496,6 +500,28 @@ client.on("interactionCreate", async (interaction) => {
       } catch (err) {
         console.error(`[Roster] Reset button error for ${customId}:`, err);
       }
+      return;
+    }
+
+    // HQ Leaderboard Pagination & Sort: hq_lb:<lbIndex>:<lb1Sort>:<lb1Page>:<lb2Sort>:<lb2Page>
+    if (customId.startsWith("hq_lb:")) {
+      const parts = customId.split(":");
+      const lb1Sort = parts[2] || "distance";
+      const lb1Page = parseInt(parts[3], 10) || 0;
+      const lb2Sort = parts[4] || "time";
+      const lb2Page = parseInt(parts[5], 10) || 0;
+      try {
+        await interaction.deferUpdate();
+        const response = await renderHQLeaderboardPage(guild?.id || process.env.HQ_GUILD_ID, lb1Sort, lb1Page, lb2Sort, lb2Page);
+        if (response) await interaction.editReply(response);
+      } catch (err) {
+        console.error(`[HQ LB] Button error for ${customId}:`, err);
+      }
+      return;
+    }
+
+    if (customId.startsWith("hq_noop")) {
+      await interaction.deferUpdate().catch(() => {});
       return;
     }
 

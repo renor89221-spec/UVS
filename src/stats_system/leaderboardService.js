@@ -518,7 +518,138 @@ async function resetRosterToDefault(client, guildId) {
   }
 }
 
-// ─── HQ Server: Global dashboard (3 embeds in 1 message) ───
+// ─── HQ Server: Global dashboard (3 Components v2 Containers in 1 message) ───
+const HQ_SORT_CONFIG = {
+  distance: { label: "Distance", emoji: "🛤️", col: "total_distance_km", fmt: r => formatDistance(r.total_distance_km) },
+  time:     { label: "Drive Time", emoji: "⏱️", col: "total_time_minutes", fmt: r => formatHours(r.total_time_minutes) },
+  score:    { label: "Total Score", emoji: "🏆", col: "total_score", fmt: r => `${Math.round(r.total_score || 0).toLocaleString()} pts` },
+  stars:    { label: "Total Stars", emoji: "⭐", col: "total_stars", fmt: r => `${Math.round(r.total_stars || 0).toLocaleString()} ★` },
+  clean:    { label: "Clean Deliveries", emoji: "✅", col: "clean_deliveries", fmt: r => `${(r.clean_deliveries || 0).toLocaleString()} clean` },
+};
+
+const HQ_SORT_ORDER = ["distance", "time", "score", "stars", "clean"];
+
+function nextHqSort(current) {
+  const idx = HQ_SORT_ORDER.indexOf(current);
+  return HQ_SORT_ORDER[(idx + 1) % HQ_SORT_ORDER.length];
+}
+
+async function fetchHQLBSlice(activeGuildIds, sortKey, page) {
+  const cfg = HQ_SORT_CONFIG[sortKey] || HQ_SORT_CONFIG.distance;
+  const pageSize = 5;
+  const from = page * pageSize;
+  const to = from + pageSize - 1;
+
+  const { data, count } = await supabase
+    .from("player_stats")
+    .select(`${cfg.col}, players!inner(username, display_name, guild_tag, guild_id)`, { count: "exact" })
+    .or(`guild_id.in.(${activeGuildIds.join(",")}),guild_id.is.null`, { referencedTable: "players" })
+    .gt(cfg.col, 0)
+    .order(cfg.col, { ascending: false })
+    .range(from, to);
+
+  return { rows: data || [], total: count || 0, cfg };
+}
+
+function buildHQLeaderboardContainer(lbIndex, sortKey, page, slice, otherSort, otherPage, accentColor) {
+  const { rows, total, cfg } = slice;
+  const totalPages = Math.max(1, Math.ceil(total / 5));
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const nextSortKey = nextHqSort(sortKey);
+  const nextSortCfg = HQ_SORT_CONFIG[nextSortKey];
+
+  const lines = rows.length > 0
+    ? rows.map((row, i) => {
+        const rank = safePage * 5 + i + 1;
+        const tag = row.players?.guild_tag ? `\`${row.players.guild_tag}\` ` : "";
+        const name = row.players?.display_name || row.players?.username || "Unknown";
+        return `**#${rank}** ${tag}**${name}** — ${cfg.fmt(row)}`;
+      }).join("\n")
+    : "*No drivers recorded yet.*";
+
+  const prevState = lbIndex === 1
+    ? `hq_lb:1:${sortKey}:${safePage - 1}:${otherSort}:${otherPage}`
+    : `hq_lb:2:${otherSort}:${otherPage}:${sortKey}:${safePage - 1}`;
+  const nextState = lbIndex === 1
+    ? `hq_lb:1:${sortKey}:${safePage + 1}:${otherSort}:${otherPage}`
+    : `hq_lb:2:${otherSort}:${otherPage}:${sortKey}:${safePage + 1}`;
+  const sortState = lbIndex === 1
+    ? `hq_lb:1:${nextSortKey}:0:${otherSort}:${otherPage}`
+    : `hq_lb:2:${otherSort}:${otherPage}:${nextSortKey}:0`;
+
+  return {
+    type: 17,
+    accent_color: accentColor,
+    components: [
+      { type: 10, content: `### ${cfg.emoji} ${cfg.label} Leaderboard (Global)\n-# Page ${safePage + 1}/${totalPages} • Top 5 per page • Whole Network` },
+      { type: 14, divider: true, spacing: 1 },
+      { type: 10, content: lines },
+      {
+        type: 1,
+        components: [
+          { type: 2, style: 1, label: "Prev", emoji: { name: "◀️" }, custom_id: prevState, disabled: safePage === 0 },
+          { type: 2, style: 2, label: `${safePage + 1} / ${totalPages}`, custom_id: `hq_noop:${lbIndex}`, disabled: true },
+          { type: 2, style: 1, label: "Next", emoji: { name: "▶️" }, custom_id: nextState, disabled: safePage >= totalPages - 1 },
+          { type: 2, style: 2, label: `Sort: ${nextSortCfg.label}`, emoji: { name: "🔀" }, custom_id: sortState }
+        ]
+      }
+    ]
+  };
+}
+
+async function buildHQComponentsPayload(guildConfig, lb1Sort = "distance", lb1Page = 0, lb2Sort = "time", lb2Page = 0) {
+  const { data: activeGuildsRaw } = await supabase.from("approved_guilds").select("guild_id").eq("is_suspended", false);
+  const activeGuildIds = activeGuildsRaw ? activeGuildsRaw.map(g => g.guild_id) : [];
+  if (activeGuildIds.length === 0) return null;
+
+  const [
+    { count: totalPlayers },
+    { data: allStats },
+    { data: guildsData },
+    lb1Slice,
+    lb2Slice
+  ] = await Promise.all([
+    supabase.from("players").select("*", { count: "exact", head: true }),
+    supabase.from("player_stats").select("total_distance_km, total_time_minutes"),
+    supabase.from("approved_guilds").select("guild_id, guild_tag, guild_name").eq("is_suspended", false),
+    fetchHQLBSlice(activeGuildIds, lb1Sort, lb1Page),
+    fetchHQLBSlice(activeGuildIds, lb2Sort, lb2Page),
+  ]);
+
+  const activeVTCCount  = (guildsData || []).filter(g => g.guild_id !== process.env.HQ_GUILD_ID).length;
+  const totalDistanceKm = (allStats || []).reduce((s, r) => s + (Number(r.total_distance_km)  || 0), 0);
+  const totalTimeMin    = (allStats || []).reduce((s, r) => s + (Number(r.total_time_minutes) || 0), 0);
+  const accentColor = guildConfig?.embed_color || 0xff7801;
+
+  const statusContainer = {
+    type: 17,
+    accent_color: accentColor,
+    components: [
+      { type: 10, content: "# 🌐 UVS — Network Status\n-# Live statistics across all registered VTCs and Independent Drivers." },
+      { type: 14, divider: true, spacing: 1 },
+      {
+        type: 10,
+        content:
+          `${E.drivers} **Registered Truckers:** \`${(totalPlayers || 0).toLocaleString()}\`\n` +
+          `🏢 **Unified VTCs:** \`${activeVTCCount}\`\n` +
+          `${E.distance} **Total Distance:** \`${formatDistance(totalDistanceKm)}\`\n` +
+          `${E.time} **Total Drive Time:** \`${formatHours(totalTimeMin)}\``
+      },
+      { type: 14, divider: true, spacing: 1 },
+      { type: 10, content: "-# Managed by NMC • Use bot commands for full leaderboards" }
+    ]
+  };
+
+  const lb1Container = buildHQLeaderboardContainer(1, lb1Sort, lb1Page, lb1Slice, lb2Sort, lb2Page, accentColor);
+  const lb2Container = buildHQLeaderboardContainer(2, lb2Sort, lb2Page, lb2Slice, lb1Sort, lb1Page, accentColor);
+
+  return {
+    embeds: [],
+    components: [statusContainer, lb1Container, lb2Container],
+    flags: 32768
+  };
+}
+
 async function performHQLeaderboardUpdate(client, guildId, guildConfig, guildRow) {
   const channel = await client.channels.fetch(guildConfig.leaderboard_channel_id).catch(async (err) => {
     console.error(`[Leaderboard][HQ] Cannot fetch channel:`, err.message);
@@ -526,77 +657,19 @@ async function performHQLeaderboardUpdate(client, guildId, guildConfig, guildRow
   });
   if (!channel) return;
 
-  const { data: activeGuildsRaw } = await supabase.from("approved_guilds").select("guild_id").eq("is_suspended", false);
-  const activeGuildIds = activeGuildsRaw ? activeGuildsRaw.map(g => g.guild_id) : [];
-  if (activeGuildIds.length === 0) return;
-
-  const [
-    { count: totalPlayers },
-    { data: allStats },
-    { data: guildsData },
-    { data: topDistance },
-    { data: topTime }
-  ] = await Promise.all([
-    supabase.from("players").select("*", { count: "exact", head: true }),
-    supabase.from("player_stats").select("total_distance_km, total_time_minutes"),
-    supabase.from("approved_guilds").select("guild_id, guild_tag, guild_name").eq("is_suspended", false),
-    supabase.from("player_stats")
-      .select("total_distance_km, players!inner(username, display_name, guild_tag, guild_id)")
-      .or(`guild_id.in.(${activeGuildIds.join(",")}),guild_id.is.null`, { referencedTable: "players" })
-      .gt("total_distance_km", 0)
-      .order("total_distance_km", { ascending: false })
-      .limit(5),
-    supabase.from("player_stats")
-      .select("total_time_minutes, players!inner(username, display_name, guild_tag, guild_id)")
-      .or(`guild_id.in.(${activeGuildIds.join(",")}),guild_id.is.null`, { referencedTable: "players" })
-      .gt("total_time_minutes", 0)
-      .order("total_time_minutes", { ascending: false })
-      .limit(5),
-  ]);
-
-  const activeVTCCount  = (guildsData || []).filter(g => g.guild_id !== process.env.HQ_GUILD_ID).length;
-  const totalDistanceKm = (allStats || []).reduce((s, r) => s + (Number(r.total_distance_km)  || 0), 0);
-  const totalTimeMin    = (allStats || []).reduce((s, r) => s + (Number(r.total_time_minutes) || 0), 0);
-
-  const hqEmbed = {
-    title: "🌐 UVS — Network Status",
-    description: "Live statistics across all registered VTCs and Independent Drivers.",
-    color: guildConfig.embed_color,
-    thumbnail: guildConfig.thumbnail ? { url: guildConfig.thumbnail } : undefined,
-    fields: [
-      { name: "👤 Registered Truckers", value: `${(totalPlayers || 0).toLocaleString()}`, inline: true },
-      { name: "🏢 Unified VTCs",        value: `${activeVTCCount}`,                        inline: true },
-      { name: "🛤️ Total Distance",      value: formatDistance(totalDistanceKm),             inline: true },
-      { name: "⏱️ Total Drive Time",    value: formatHours(totalTimeMin),                  inline: true }
-    ],
-    footer: { text: "Managed by NMC" }
-  };
-
-  const makeFields = (rows, fmt) => rows.map((row, i) => ({
-    name: `#${i + 1} ${row.players?.guild_tag || ""} ${row.players?.display_name || row.players?.username || "Unknown"}`.trim(),
-    value: fmt(row),
-    inline: false
-  }));
-
-  const distEmbed = {
-    title: "🛤️ Distance Leaderboard (Global)",
-    color: guildConfig.embed_color,
-    fields: makeFields(topDistance || [], row => formatDistance(row.total_distance_km))
-  };
-  const timeEmbed = {
-    title: "⏱️ Driving Time Leaderboard (Global)",
-    color: guildConfig.embed_color,
-    fields: makeFields(topTime || [], row => formatHours(row.total_time_minutes)),
-    footer: { text: "Managed by NMC • Use bot commands for full leaderboards." }
-  };
-
-  const embeds = [hqEmbed, distEmbed, timeEmbed];
+  const payload = await buildHQComponentsPayload(guildConfig, "distance", 0, "time", 0);
+  if (!payload) return;
 
   const currentId = (guildRow.lb_msg_guilds || "").split(",")[0]?.trim() || null;
-  const newId = await sendOrEditMessage(channel, currentId, { embeds });
+  const newId = await sendOrEditMessage(channel, currentId, payload);
   if (newId && newId !== guildRow.lb_msg_guilds) {
     await supabase.from("approved_guilds").update({ lb_msg_guilds: newId }).eq("guild_id", guildId);
   }
+}
+
+async function renderHQLeaderboardPage(guildId, lb1Sort = "distance", lb1Page = 0, lb2Sort = "time", lb2Page = 0) {
+  const guildConfig = await getGuildConfig(guildId);
+  return buildHQComponentsPayload(guildConfig, lb1Sort, lb1Page, lb2Sort, lb2Page);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -788,5 +861,6 @@ module.exports = {
   updateLeaderboard,
   updateGlobalWebhook,
   renderRosterPage,
+  renderHQLeaderboardPage,
   resetRosterToDefault,
 };
